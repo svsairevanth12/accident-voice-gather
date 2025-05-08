@@ -1,7 +1,6 @@
 
 import React from 'react';
 import { Link } from 'react-router-dom';
-import { Button } from "@/components/ui/button";
 
 const Navbar: React.FC = () => {
   return (
@@ -29,13 +28,6 @@ const Navbar: React.FC = () => {
           <a href="#how-it-works" className="text-gray-700 hover:text-brand-600 transition-colors">
             How It Works
           </a>
-        </div>
-        
-        <div className="flex items-center space-x-4">
-          <Button variant="outline" className="hidden md:inline-flex">
-            Log in
-          </Button>
-          <Button>Get Started</Button>
         </div>
       </div>
     </nav>

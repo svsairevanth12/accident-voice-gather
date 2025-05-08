@@ -1,28 +1,13 @@
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
-import { Mic, MicOff, Volume2, AlertCircle } from "lucide-react";
+import { Mic, MicOff, Volume2, AlertCircle, ChevronLeft, ChevronRight } from "lucide-react";
 import { storeResponse } from '@/utils/storage';
 import Navbar from '@/components/Navbar';
 import Footer from '@/components/Footer';
 import { useToast } from "@/hooks/use-toast";
-
-interface Question {
-  id: number;
-  text: string;
-}
-
-const questions: Question[] = [
-  { id: 1, text: "When did the accident occur? Please provide the date and approximate time." },
-  { id: 2, text: "Where exactly did the accident take place? Please provide the location details." },
-  { id: 3, text: "Were there any other vehicles involved? If yes, how many?" },
-  { id: 4, text: "Were there any injuries to you or others? Please describe." },
-  { id: 5, text: "Please describe how the accident occurred in your own words." },
-  { id: 6, text: "Were there any witnesses to the accident? If yes, do you have their contact information?" },
-  { id: 7, text: "Have you taken any photos of the damage or accident scene?" },
-  { id: 8, text: "Have you reported this accident to the police? If yes, do you have a report number?" },
-];
+import { accidentQuestions, Question } from '@/data/accidentQuestions';
 
 const VoiceAgent: React.FC = () => {
   const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0);
@@ -30,51 +15,56 @@ const VoiceAgent: React.FC = () => {
   const [responses, setResponses] = useState<Record<number, string>>({});
   const [isComplete, setIsComplete] = useState(false);
   const { toast } = useToast();
+  const [activeCategory, setActiveCategory] = useState<string | null>(null);
 
-  const currentQuestion = questions[currentQuestionIndex];
+  const currentQuestion = accidentQuestions[currentQuestionIndex];
+  
+  useEffect(() => {
+    // Initialize responses with stored answers
+    const initialResponses: Record<number, string> = {};
+    accidentQuestions.forEach(q => {
+      if (q.answer) {
+        initialResponses[q.id] = q.answer;
+      }
+    });
+    
+    setResponses(initialResponses);
+    
+    if (accidentQuestions.length > 0) {
+      setActiveCategory(accidentQuestions[0].category);
+    }
+  }, []);
   
   const startListening = () => {
     setIsListening(true);
-    
-    // In a real implementation, we would use the Web Speech API here
-    // This is a simplified mock implementation
-    setTimeout(() => {
-      stopListening();
-    }, 5000);
     
     toast({
       title: "Listening...",
       description: "Please speak clearly into your microphone.",
     });
+    
+    // Simulate ending the listening after a short delay
+    setTimeout(() => {
+      stopListening();
+    }, 2000);
   };
   
   const stopListening = () => {
     setIsListening(false);
     
-    // Mock response - in a real implementation, this would come from speech recognition
-    const mockResponses = [
-      "It happened yesterday around 3 PM.",
-      "At the intersection of Main Street and 5th Avenue.",
-      "Yes, there was one other car involved.",
-      "No injuries to report fortunately.",
-      "I was stopping at a red light and the car behind me didn't brake in time.",
-      "Yes, there was one witness who gave me their number.",
-      "Yes, I took several photos of both vehicles.",
-      "Yes, the report number is 2023-45678."
-    ];
+    // Get the pre-defined answer
+    const currentAnswer = currentQuestion.answer || '';
     
-    // Store the mock response
-    const newResponse = mockResponses[currentQuestionIndex];
-    
+    // Store the response
     setResponses(prev => ({
       ...prev,
-      [currentQuestion.id]: newResponse
+      [currentQuestion.id]: currentAnswer
     }));
     
     // Store in our storage util
     storeResponse('voice', {
       question: currentQuestion.text,
-      answer: newResponse
+      answer: currentAnswer
     });
     
     toast({
@@ -84,8 +74,10 @@ const VoiceAgent: React.FC = () => {
   };
   
   const handleNext = () => {
-    if (currentQuestionIndex < questions.length - 1) {
-      setCurrentQuestionIndex(prev => prev + 1);
+    if (currentQuestionIndex < accidentQuestions.length - 1) {
+      const nextIndex = currentQuestionIndex + 1;
+      setCurrentQuestionIndex(nextIndex);
+      setActiveCategory(accidentQuestions[nextIndex].category);
     } else {
       setIsComplete(true);
       
@@ -98,7 +90,9 @@ const VoiceAgent: React.FC = () => {
   
   const handlePrevious = () => {
     if (currentQuestionIndex > 0) {
-      setCurrentQuestionIndex(prev => prev - 1);
+      const prevIndex = currentQuestionIndex - 1;
+      setCurrentQuestionIndex(prevIndex);
+      setActiveCategory(accidentQuestions[prevIndex].category);
     }
   };
   
@@ -106,9 +100,30 @@ const VoiceAgent: React.FC = () => {
     setCurrentQuestionIndex(0);
     setResponses({});
     setIsComplete(false);
+    if (accidentQuestions.length > 0) {
+      setActiveCategory(accidentQuestions[0].category);
+    }
   };
   
   const hasCurrentResponse = responses[currentQuestion?.id];
+  
+  // Get unique categories
+  const categories = Array.from(new Set(accidentQuestions.map(q => q.category)));
+  
+  // Get current category progress
+  const getCurrentCategoryProgress = () => {
+    if (!activeCategory) return { current: 0, total: 0 };
+    
+    const categoryQuestions = accidentQuestions.filter(q => q.category === activeCategory);
+    const currentCatIndex = categoryQuestions.findIndex(q => q.id === currentQuestion.id);
+    
+    return {
+      current: currentCatIndex + 1,
+      total: categoryQuestions.length
+    };
+  };
+  
+  const progress = getCurrentCategoryProgress();
 
   return (
     <div className="min-h-screen flex flex-col">
@@ -119,12 +134,31 @@ const VoiceAgent: React.FC = () => {
           <div className="max-w-3xl mx-auto">
             <h1 className="text-3xl font-bold mb-8 text-center text-gray-900">Voice Accident Assistant</h1>
             
+            <div className="mb-6">
+              <div className="flex flex-wrap gap-2 justify-center">
+                {categories.map((category, index) => (
+                  <div 
+                    key={index}
+                    className={`px-3 py-1.5 rounded-full text-sm font-medium cursor-pointer transition-colors
+                      ${activeCategory === category ? 'bg-brand-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}
+                  >
+                    {category}
+                  </div>
+                ))}
+              </div>
+            </div>
+            
             <Card className="shadow-md border-gray-200">
               <CardHeader>
                 <CardTitle>Accident Details Collection</CardTitle>
                 <CardDescription>
                   Please answer the following questions about your accident using your voice.
                 </CardDescription>
+                {activeCategory && (
+                  <div className="mt-2 text-sm text-gray-600">
+                    {activeCategory} - Question {progress.current} of {progress.total}
+                  </div>
+                )}
               </CardHeader>
               
               <CardContent>
@@ -135,7 +169,7 @@ const VoiceAgent: React.FC = () => {
                         <div className="bg-brand-100 p-2 rounded-full">
                           <Volume2 className="h-5 w-5 text-brand-600" />
                         </div>
-                        <div>
+                        <div className="flex-1">
                           <p className="text-lg font-medium">{currentQuestion.text}</p>
                           {hasCurrentResponse && (
                             <div className="mt-4 p-3 bg-white rounded-lg border border-gray-200">
@@ -167,10 +201,14 @@ const VoiceAgent: React.FC = () => {
                       
                       <div className="flex justify-between mt-4">
                         <Button variant="outline" onClick={handlePrevious} disabled={currentQuestionIndex === 0}>
+                          <ChevronLeft className="mr-1 h-4 w-4" />
                           Previous
                         </Button>
                         <Button onClick={handleNext} disabled={!hasCurrentResponse}>
-                          {currentQuestionIndex === questions.length - 1 ? 'Complete' : 'Next'}
+                          {currentQuestionIndex === accidentQuestions.length - 1 ? 'Complete' : 'Next'}
+                          {currentQuestionIndex !== accidentQuestions.length - 1 && (
+                            <ChevronRight className="ml-1 h-4 w-4" />
+                          )}
                         </Button>
                       </div>
                     </div>
