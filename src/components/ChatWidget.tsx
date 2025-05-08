@@ -6,6 +6,8 @@ import { MessageCircle, Send, X, Mic, MicOff } from "lucide-react";
 import { storeResponse } from '@/utils/storage';
 import { useToast } from "@/hooks/use-toast";
 import { accidentQuestions } from '@/data/accidentQuestions';
+import { supabase } from '@/integrations/supabase/client';
+import { v4 as uuidv4 } from 'uuid';
 
 type Message = {
   id: number;
@@ -32,6 +34,7 @@ const ChatWidget: React.FC = () => {
   const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0);
   const [isListening, setIsListening] = useState(false);
   const [transcript, setTranscript] = useState('');
+  const [sessionId] = useState<string>(() => uuidv4());
   
   // Reference for speech recognition
   const recognitionRef = useRef<SpeechRecognition | null>(null);
@@ -136,7 +139,7 @@ const ChatWidget: React.FC = () => {
     }
   };
 
-  const handleSendMessage = () => {
+  const handleSendMessage = async () => {
     if (!input.trim()) return;
     
     // Add user message
@@ -151,12 +154,26 @@ const ChatWidget: React.FC = () => {
     // Find the last question that was asked
     const lastQuestion = [...messages].reverse().find(msg => msg.isQuestion);
     
-    // Store the response
+    // Store the response locally
     if (lastQuestion?.questionId) {
       storeResponse('chat', { 
         question: lastQuestion.text, 
         answer: input 
       });
+      
+      // Store in Supabase
+      try {
+        await supabase.from('user_responses').insert({
+          session_id: sessionId,
+          question_id: lastQuestion.questionId,
+          question: lastQuestion.text,
+          answer: input,
+          category: accidentQuestions.find(q => q.id === lastQuestion.questionId)?.category || null,
+          response_type: 'chat'
+        });
+      } catch (error) {
+        console.error('Error storing response in Supabase:', error);
+      }
     }
     
     setInput('');

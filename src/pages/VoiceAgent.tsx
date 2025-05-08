@@ -8,6 +8,8 @@ import Navbar from '@/components/Navbar';
 import Footer from '@/components/Footer';
 import { useToast } from "@/hooks/use-toast";
 import { accidentQuestions, Question, getQuestionsByCategory } from '@/data/accidentQuestions';
+import { supabase } from '@/integrations/supabase/client';
+import { v4 as uuidv4 } from 'uuid';
 
 const VoiceAgent: React.FC = () => {
   const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0);
@@ -17,13 +19,19 @@ const VoiceAgent: React.FC = () => {
   const { toast } = useToast();
   const [activeCategory, setActiveCategory] = useState<string | null>(null);
   const [transcript, setTranscript] = useState('');
+  const [isReadingQuestion, setIsReadingQuestion] = useState(false);
+  const [sessionId, setSessionId] = useState<string>('');
   
   // Reference for speech recognition
   const recognitionRef = useRef<SpeechRecognition | null>(null);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
 
   const currentQuestion = accidentQuestions[currentQuestionIndex];
   
   useEffect(() => {
+    // Generate a session ID when the component mounts
+    setSessionId(uuidv4());
+    
     // Initialize responses with stored answers
     const initialResponses: Record<number, string> = {};
     accidentQuestions.forEach(q => {
@@ -69,7 +77,59 @@ const VoiceAgent: React.FC = () => {
         }
       };
     }
+
+    // Create an audio element for text-to-speech
+    audioRef.current = new Audio();
+    
+    // Read the first question when component mounts
+    if (currentQuestion) {
+      setTimeout(() => {
+        readQuestion(currentQuestion.text);
+      }, 1000);
+    }
+
+    return () => {
+      // Cleanup
+      if (audioRef.current) {
+        audioRef.current.pause();
+      }
+    };
   }, []);
+  
+  useEffect(() => {
+    // Read the current question whenever it changes
+    if (currentQuestion && !isComplete) {
+      readQuestion(currentQuestion.text);
+    }
+  }, [currentQuestionIndex]);
+  
+  const readQuestion = async (text: string) => {
+    try {
+      setIsReadingQuestion(true);
+      
+      // Create a simple speech synthesis utterance
+      const utterance = new SpeechSynthesisUtterance(text);
+      utterance.rate = 1.0;
+      utterance.pitch = 1.0;
+      utterance.volume = 1.0;
+      
+      // Use browser's built-in speech synthesis
+      window.speechSynthesis.speak(utterance);
+      
+      utterance.onend = () => {
+        setIsReadingQuestion(false);
+      };
+      
+    } catch (error) {
+      console.error('Error reading question:', error);
+      setIsReadingQuestion(false);
+      toast({
+        title: "Text-to-Speech Error",
+        description: "There was a problem reading the question. Please try again.",
+        variant: "destructive",
+      });
+    }
+  };
   
   const startListening = () => {
     if (!recognitionRef.current) {
@@ -90,7 +150,7 @@ const VoiceAgent: React.FC = () => {
     });
   };
   
-  const stopListening = () => {
+  const stopListening = async () => {
     if (recognitionRef.current && isListening) {
       recognitionRef.current.stop();
     }
@@ -100,7 +160,7 @@ const VoiceAgent: React.FC = () => {
     // Use transcript if available or fallback to pre-defined answer
     const answer = transcript || currentQuestion.answer || '';
     
-    // Store the response
+    // Store the response locally
     setResponses(prev => ({
       ...prev,
       [currentQuestion.id]: answer
@@ -112,6 +172,20 @@ const VoiceAgent: React.FC = () => {
       answer
     });
     
+    try {
+      // Store in Supabase
+      await supabase.from('user_responses').insert({
+        session_id: sessionId,
+        question_id: currentQuestion.id,
+        question: currentQuestion.text,
+        answer: answer,
+        category: currentQuestion.category,
+        response_type: 'voice'
+      });
+    } catch (error) {
+      console.error('Error storing response in Supabase:', error);
+    }
+    
     toast({
       title: "Response Recorded",
       description: "We've recorded your answer.",
@@ -119,6 +193,13 @@ const VoiceAgent: React.FC = () => {
     
     // Reset transcript
     setTranscript('');
+    
+    // Automatically move to the next question if we have an answer
+    if (answer) {
+      setTimeout(() => {
+        handleNext();
+      }, 1000);
+    }
   };
   
   const handleNext = () => {
@@ -148,6 +229,7 @@ const VoiceAgent: React.FC = () => {
     setCurrentQuestionIndex(0);
     setResponses({});
     setIsComplete(false);
+    setSessionId(uuidv4());
     if (accidentQuestions.length > 0) {
       setActiveCategory(accidentQuestions[0].category);
     }
@@ -214,7 +296,7 @@ const VoiceAgent: React.FC = () => {
                   <>
                     <div className="bg-gray-50 p-6 rounded-lg mb-6">
                       <div className="flex items-start gap-4">
-                        <div className="bg-brand-100 p-2 rounded-full">
+                        <div className={`p-2 rounded-full ${isReadingQuestion ? 'bg-brand-100 animate-pulse' : 'bg-brand-100'}`}>
                           <Volume2 className="h-5 w-5 text-brand-600" />
                         </div>
                         <div className="flex-1">
@@ -239,7 +321,7 @@ const VoiceAgent: React.FC = () => {
                           size="lg"
                           onClick={isListening ? stopListening : startListening} 
                           className={`rounded-full h-16 w-16 ${isListening ? 'bg-red-500 hover:bg-red-600' : 'bg-brand-600 hover:bg-brand-700'}`}
-                          disabled={!('SpeechRecognition' in window || 'webkitSpeechRecognition' in window)}
+                          disabled={!('SpeechRecognition' in window || 'webkitSpeechRecognition' in window) || isReadingQuestion}
                         >
                           {isListening ? (
                             <MicOff className="h-6 w-6" />
