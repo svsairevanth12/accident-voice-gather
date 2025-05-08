@@ -1,5 +1,5 @@
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Mic, MicOff, Volume2, AlertCircle, ChevronLeft, ChevronRight } from "lucide-react";
@@ -7,7 +7,7 @@ import { storeResponse } from '@/utils/storage';
 import Navbar from '@/components/Navbar';
 import Footer from '@/components/Footer';
 import { useToast } from "@/hooks/use-toast";
-import { accidentQuestions, Question } from '@/data/accidentQuestions';
+import { accidentQuestions, Question, getQuestionsByCategory } from '@/data/accidentQuestions';
 
 const VoiceAgent: React.FC = () => {
   const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0);
@@ -16,6 +16,10 @@ const VoiceAgent: React.FC = () => {
   const [isComplete, setIsComplete] = useState(false);
   const { toast } = useToast();
   const [activeCategory, setActiveCategory] = useState<string | null>(null);
+  const [transcript, setTranscript] = useState('');
+  
+  // Reference for speech recognition
+  const recognitionRef = useRef<SpeechRecognition | null>(null);
 
   const currentQuestion = accidentQuestions[currentQuestionIndex];
   
@@ -33,44 +37,88 @@ const VoiceAgent: React.FC = () => {
     if (accidentQuestions.length > 0) {
       setActiveCategory(accidentQuestions[0].category);
     }
+    
+    // Initialize speech recognition
+    if ('SpeechRecognition' in window || 'webkitSpeechRecognition' in window) {
+      const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+      recognitionRef.current = new SpeechRecognition();
+      recognitionRef.current.continuous = true;
+      recognitionRef.current.interimResults = true;
+
+      recognitionRef.current.onresult = (event) => {
+        const transcript = Array.from(event.results)
+          .map(result => result[0])
+          .map(result => result.transcript)
+          .join('');
+        
+        setTranscript(transcript);
+      };
+
+      recognitionRef.current.onerror = (event) => {
+        console.error('Speech recognition error', event.error);
+        setIsListening(false);
+        toast({
+          title: "Speech Recognition Error",
+          description: "There was a problem with speech recognition. Please try again.",
+        });
+      };
+      
+      recognitionRef.current.onend = () => {
+        if (isListening) {
+          stopListening();
+        }
+      };
+    }
   }, []);
   
   const startListening = () => {
+    if (!recognitionRef.current) {
+      toast({
+        title: "Speech Recognition Not Supported",
+        description: "Your browser doesn't support speech recognition. Please use a different browser.",
+      });
+      return;
+    }
+    
+    setTranscript('');
     setIsListening(true);
+    recognitionRef.current.start();
     
     toast({
       title: "Listening...",
       description: "Please speak clearly into your microphone.",
     });
-    
-    // Simulate ending the listening after a short delay
-    setTimeout(() => {
-      stopListening();
-    }, 2000);
   };
   
   const stopListening = () => {
+    if (recognitionRef.current && isListening) {
+      recognitionRef.current.stop();
+    }
+    
     setIsListening(false);
     
-    // Get the pre-defined answer
-    const currentAnswer = currentQuestion.answer || '';
+    // Use transcript if available or fallback to pre-defined answer
+    const answer = transcript || currentQuestion.answer || '';
     
     // Store the response
     setResponses(prev => ({
       ...prev,
-      [currentQuestion.id]: currentAnswer
+      [currentQuestion.id]: answer
     }));
     
     // Store in our storage util
     storeResponse('voice', {
       question: currentQuestion.text,
-      answer: currentAnswer
+      answer
     });
     
     toast({
       title: "Response Recorded",
       description: "We've recorded your answer.",
     });
+    
+    // Reset transcript
+    setTranscript('');
   };
   
   const handleNext = () => {
@@ -171,7 +219,12 @@ const VoiceAgent: React.FC = () => {
                         </div>
                         <div className="flex-1">
                           <p className="text-lg font-medium">{currentQuestion.text}</p>
-                          {hasCurrentResponse && (
+                          {transcript && isListening && (
+                            <div className="mt-4 p-3 bg-white rounded-lg border border-gray-200 animate-pulse">
+                              <p className="text-gray-700">{transcript}</p>
+                            </div>
+                          )}
+                          {hasCurrentResponse && !isListening && (
                             <div className="mt-4 p-3 bg-white rounded-lg border border-gray-200">
                               <p className="text-gray-700">{responses[currentQuestion.id]}</p>
                             </div>
@@ -186,6 +239,7 @@ const VoiceAgent: React.FC = () => {
                           size="lg"
                           onClick={isListening ? stopListening : startListening} 
                           className={`rounded-full h-16 w-16 ${isListening ? 'bg-red-500 hover:bg-red-600' : 'bg-brand-600 hover:bg-brand-700'}`}
+                          disabled={!('SpeechRecognition' in window || 'webkitSpeechRecognition' in window)}
                         >
                           {isListening ? (
                             <MicOff className="h-6 w-6" />
@@ -204,7 +258,7 @@ const VoiceAgent: React.FC = () => {
                           <ChevronLeft className="mr-1 h-4 w-4" />
                           Previous
                         </Button>
-                        <Button onClick={handleNext} disabled={!hasCurrentResponse}>
+                        <Button onClick={handleNext} disabled={!hasCurrentResponse && !transcript}>
                           {currentQuestionIndex === accidentQuestions.length - 1 ? 'Complete' : 'Next'}
                           {currentQuestionIndex !== accidentQuestions.length - 1 && (
                             <ChevronRight className="ml-1 h-4 w-4" />

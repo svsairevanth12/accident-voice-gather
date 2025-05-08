@@ -1,21 +1,24 @@
 
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { MessageCircle, Send, X } from "lucide-react";
+import { MessageCircle, Send, X, Mic, MicOff } from "lucide-react";
 import { storeResponse } from '@/utils/storage';
 import { useToast } from "@/hooks/use-toast";
+import { accidentQuestions } from '@/data/accidentQuestions';
 
 type Message = {
   id: number;
   text: string;
   sender: 'user' | 'bot';
+  isQuestion?: boolean;
+  questionId?: number;
 };
 
 const initialMessages: Message[] = [
   {
     id: 1,
-    text: "Hello! I'm here to help you report your accident. Can you tell me when it happened?",
+    text: "Hello! I'm here to help you report your accident. Let me ask you some questions to gather all the necessary details.",
     sender: 'bot'
   }
 ];
@@ -24,16 +27,114 @@ const ChatWidget: React.FC = () => {
   const [isOpen, setIsOpen] = useState(false);
   const [messages, setMessages] = useState<Message[]>(initialMessages);
   const [input, setInput] = useState('');
-  const messagesEndRef = React.useRef<HTMLDivElement>(null);
+  const messagesEndRef = useRef<HTMLDivElement>(null);
   const { toast } = useToast();
+  const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0);
+  const [isListening, setIsListening] = useState(false);
+  const [transcript, setTranscript] = useState('');
+  
+  // Reference for speech recognition
+  const recognitionRef = useRef<SpeechRecognition | null>(null);
+
+  useEffect(() => {
+    // Check if browser supports speech recognition
+    if ('SpeechRecognition' in window || 'webkitSpeechRecognition' in window) {
+      const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+      recognitionRef.current = new SpeechRecognition();
+      recognitionRef.current.continuous = true;
+      recognitionRef.current.interimResults = true;
+
+      recognitionRef.current.onresult = (event) => {
+        const transcript = Array.from(event.results)
+          .map(result => result[0])
+          .map(result => result.transcript)
+          .join('');
+        
+        setTranscript(transcript);
+        setInput(transcript);
+      };
+
+      recognitionRef.current.onerror = (event) => {
+        console.error('Speech recognition error', event.error);
+        setIsListening(false);
+        toast({
+          title: "Speech Recognition Error",
+          description: "There was a problem with speech recognition. Please try again.",
+        });
+      };
+    }
+  }, [toast]);
+
+  useEffect(() => {
+    scrollToBottom();
+  }, [messages]);
+
+  useEffect(() => {
+    // Ask the first question after initial greeting
+    if (messages.length === 1) {
+      setTimeout(() => {
+        askNextQuestion();
+      }, 1000);
+    }
+  }, []);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   };
 
-  React.useEffect(() => {
-    scrollToBottom();
-  }, [messages]);
+  const toggleListening = () => {
+    if (!recognitionRef.current) {
+      toast({
+        title: "Speech Recognition Not Supported",
+        description: "Your browser doesn't support speech recognition. Please type your answer.",
+      });
+      return;
+    }
+
+    if (isListening) {
+      recognitionRef.current.stop();
+      setIsListening(false);
+    } else {
+      setInput('');
+      setTranscript('');
+      recognitionRef.current.start();
+      setIsListening(true);
+      toast({
+        title: "Listening...",
+        description: "Please speak clearly. Click the mic button again to stop.",
+      });
+    }
+  };
+
+  const askNextQuestion = () => {
+    if (currentQuestionIndex < accidentQuestions.length) {
+      const question = accidentQuestions[currentQuestionIndex];
+      const newMessage: Message = {
+        id: messages.length + 1,
+        text: question.text,
+        sender: 'bot',
+        isQuestion: true,
+        questionId: question.id
+      };
+      
+      setMessages(prev => [...prev, newMessage]);
+      setCurrentQuestionIndex(prevIndex => prevIndex + 1);
+    } else {
+      // All questions have been asked
+      const finalMessage: Message = {
+        id: messages.length + 1,
+        text: "Thank you for providing all the information. Your accident report has been submitted successfully. Your case number is #AC-2023-7845.",
+        sender: 'bot'
+      };
+      
+      setMessages(prev => [...prev, finalMessage]);
+      
+      toast({
+        title: "Report Submitted",
+        description: "Your accident report has been successfully recorded.",
+      });
+    }
+  };
 
   const handleSendMessage = () => {
     if (!input.trim()) return;
@@ -46,56 +147,27 @@ const ChatWidget: React.FC = () => {
     };
     
     setMessages([...messages, newMessage]);
-    setInput('');
+    
+    // Find the last question that was asked
+    const lastQuestion = [...messages].reverse().find(msg => msg.isQuestion);
     
     // Store the response
-    storeResponse('chat', { question: messages[messages.length - 1].text, answer: input });
+    if (lastQuestion?.questionId) {
+      storeResponse('chat', { 
+        question: lastQuestion.text, 
+        answer: input 
+      });
+    }
     
-    // Simulate bot response after a short delay
+    setInput('');
+    if (isListening) {
+      toggleListening();
+    }
+    
+    // Wait a bit and then ask the next question
     setTimeout(() => {
-      let botResponse: Message;
-      
-      // Simple response logic based on conversation flow
-      if (messages.length === 1) {
-        botResponse = {
-          id: messages.length + 2,
-          text: "Thank you. Were there any injuries or other vehicles involved?",
-          sender: 'bot'
-        };
-      } else if (messages.length === 3) {
-        botResponse = {
-          id: messages.length + 2,
-          text: "I understand. Can you briefly describe how the accident occurred?",
-          sender: 'bot'
-        };
-      } else if (messages.length === 5) {
-        botResponse = {
-          id: messages.length + 2,
-          text: "Thanks for providing those details. Would you like to upload any photos of the damage?",
-          sender: 'bot'
-        };
-      } else if (messages.length === 7) {
-        botResponse = {
-          id: messages.length + 2,
-          text: "Thank you for reporting this accident. Your case number is #AC-2023-7845. We'll be in touch shortly with next steps.",
-          sender: 'bot'
-        };
-        
-        // Show success toast
-        toast({
-          title: "Report Submitted",
-          description: "Your accident report has been successfully recorded.",
-        });
-      } else {
-        botResponse = {
-          id: messages.length + 2,
-          text: "Thank you for that information. Is there anything else you'd like to add about the incident?",
-          sender: 'bot'
-        };
-      }
-      
-      setMessages(prev => [...prev, botResponse]);
-    }, 1000);
+      askNextQuestion();
+    }, 500);
   };
 
   const handleKeyPress = (e: React.KeyboardEvent) => {
@@ -141,6 +213,9 @@ const ChatWidget: React.FC = () => {
                   } p-3 rounded-lg max-w-[75%]`}
                 >
                   <p className="text-sm">{msg.text}</p>
+                  {msg.isQuestion && (
+                    <p className="text-xs text-gray-500 mt-1">Question {currentQuestionIndex} of {accidentQuestions.length}</p>
+                  )}
                 </div>
               ))}
               <div ref={messagesEndRef} />
@@ -156,6 +231,19 @@ const ChatWidget: React.FC = () => {
                 onKeyPress={handleKeyPress}
                 className="flex-1"
               />
+              <Button
+                size="icon"
+                variant="outline"
+                onClick={toggleListening}
+                className={`shrink-0 ${isListening ? 'bg-red-100' : ''}`}
+                title={isListening ? "Stop listening" : "Start voice input"}
+              >
+                {isListening ? (
+                  <MicOff className="h-4 w-4" />
+                ) : (
+                  <Mic className="h-4 w-4" />
+                )}
+              </Button>
               <Button size="icon" onClick={handleSendMessage} className="shrink-0">
                 <Send className="h-4 w-4" />
               </Button>
