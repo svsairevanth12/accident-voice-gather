@@ -2,13 +2,22 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
-import { Mic, MicOff, Volume2, AlertCircle, ChevronLeft, ChevronRight } from "lucide-react";
+import { Mic, MicOff, Volume2, AlertCircle, ChevronLeft, ChevronRight, Zap, ZapOff, Upload, PaperclipIcon } from "lucide-react";
 import { storeResponse } from '@/utils/storage';
 import Navbar from '@/components/Navbar';
 import Footer from '@/components/Footer';
 import { useToast } from "@/hooks/use-toast";
 import { accidentQuestions, Question, getQuestionsByCategory } from '@/data/accidentQuestions';
 import { supabase } from '@/integrations/supabase/client';
+import { Switch } from "@/components/ui/switch";
+import FileUpload from '@/components/FileUpload';
+import FileDisplay from '@/components/FileDisplay';
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { v4 as uuidv4 } from 'uuid';
 
 const VoiceAgent: React.FC = () => {
@@ -21,17 +30,120 @@ const VoiceAgent: React.FC = () => {
   const [transcript, setTranscript] = useState('');
   const [isReadingQuestion, setIsReadingQuestion] = useState(false);
   const [sessionId, setSessionId] = useState<string>('');
-  
+  const [autoMode, setAutoMode] = useState(true);
+  const [showFileUpload, setShowFileUpload] = useState(false);
+  const [uploadedFiles, setUploadedFiles] = useState<Array<{
+    url: string;
+    fileName: string;
+    fileType: string;
+    questionId?: number;
+  }>>([]);
+
   // Reference for speech recognition
   const recognitionRef = useRef<SpeechRecognition | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
 
+  // References for silence detection
+  const silenceTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const lastTranscriptRef = useRef<string>('');
+  const silenceThresholdMs = 2000; // 2 seconds of silence to auto-stop
+
   const currentQuestion = accidentQuestions[currentQuestionIndex];
-  
+
+  // Function to set up speech recognition event handlers
+  const setupSpeechRecognitionHandlers = () => {
+    if (!recognitionRef.current) return;
+
+    recognitionRef.current.onresult = (event) => {
+      try {
+        const transcript = Array.from(event.results)
+          .map(result => result[0])
+          .map(result => result.transcript)
+          .join('');
+
+        setTranscript(transcript);
+
+        // Reset silence detection timer whenever we get new speech
+        if (silenceTimeoutRef.current) {
+          clearTimeout(silenceTimeoutRef.current);
+        }
+
+        // If the transcript has changed, start a new silence detection timer
+        if (transcript !== lastTranscriptRef.current) {
+          lastTranscriptRef.current = transcript;
+
+          // Set a timeout to detect silence
+          silenceTimeoutRef.current = setTimeout(() => {
+            if (isListening && autoMode) {
+              console.log('Silence detected, stopping listening automatically');
+              stopListening();
+            }
+          }, silenceThresholdMs);
+        }
+      } catch (error) {
+        console.error('Error processing speech recognition result:', error);
+      }
+    };
+
+    recognitionRef.current.onerror = (event) => {
+      console.error('Speech recognition error', event.error);
+
+      // Only handle the error if we're still in listening mode
+      if (isListening) {
+        setIsListening(false);
+
+        // Don't show error toast for 'aborted' errors as these are often just from stopping recognition
+        if (event.error !== 'aborted') {
+          toast({
+            title: "Speech Recognition Error",
+            description: "There was a problem with speech recognition. Please try again.",
+          });
+
+          // If in auto mode, try again after a delay
+          if (autoMode && !isComplete) {
+            setTimeout(() => {
+              if (!isListening) {
+                startListening();
+              }
+            }, 1000);
+          }
+        }
+      }
+    };
+
+    recognitionRef.current.onend = () => {
+      console.log('Speech recognition ended');
+
+      // Clear any pending silence detection
+      if (silenceTimeoutRef.current) {
+        clearTimeout(silenceTimeoutRef.current);
+        silenceTimeoutRef.current = null;
+      }
+
+      // Only process the end event if we're still in listening mode
+      // This prevents circular calls between onend and stopListening
+      if (isListening) {
+        console.log('Recognition ended while still in listening mode');
+
+        // Update state
+        setIsListening(false);
+
+        // If we have a transcript and we're in auto mode, process it
+        const currentTranscript = transcript;
+        if (currentTranscript.trim() && autoMode) {
+          // Process the response with a slight delay to ensure state is updated
+          setTimeout(() => {
+            processResponse(currentTranscript);
+          }, 100);
+        }
+      }
+    };
+  };
+
   useEffect(() => {
     // Generate a session ID when the component mounts
     setSessionId(uuidv4());
-    
+
     // Initialize responses with stored answers
     const initialResponses: Record<number, string> = {};
     accidentQuestions.forEach(q => {
@@ -39,13 +151,13 @@ const VoiceAgent: React.FC = () => {
         initialResponses[q.id] = q.answer;
       }
     });
-    
+
     setResponses(initialResponses);
-    
+
     if (accidentQuestions.length > 0) {
       setActiveCategory(accidentQuestions[0].category);
     }
-    
+
     // Initialize speech recognition
     if ('SpeechRecognition' in window || 'webkitSpeechRecognition' in window) {
       const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -53,34 +165,13 @@ const VoiceAgent: React.FC = () => {
       recognitionRef.current.continuous = true;
       recognitionRef.current.interimResults = true;
 
-      recognitionRef.current.onresult = (event) => {
-        const transcript = Array.from(event.results)
-          .map(result => result[0])
-          .map(result => result.transcript)
-          .join('');
-        
-        setTranscript(transcript);
-      };
-
-      recognitionRef.current.onerror = (event) => {
-        console.error('Speech recognition error', event.error);
-        setIsListening(false);
-        toast({
-          title: "Speech Recognition Error",
-          description: "There was a problem with speech recognition. Please try again.",
-        });
-      };
-      
-      recognitionRef.current.onend = () => {
-        if (isListening) {
-          stopListening();
-        }
-      };
+      // Set up event handlers
+      setupSpeechRecognitionHandlers();
     }
 
     // Create an audio element for text-to-speech
     audioRef.current = new Audio();
-    
+
     // Read the first question when component mounts
     if (currentQuestion) {
       setTimeout(() => {
@@ -93,33 +184,77 @@ const VoiceAgent: React.FC = () => {
       if (audioRef.current) {
         audioRef.current.pause();
       }
+
+      // Stop any ongoing speech synthesis
+      window.speechSynthesis.cancel();
+
+      // Stop any ongoing speech recognition
+      if (recognitionRef.current) {
+        try {
+          recognitionRef.current.stop();
+        } catch (e) {
+          console.error('Error stopping speech recognition:', e);
+        }
+      }
+
+      // Clear any pending silence detection
+      if (silenceTimeoutRef.current) {
+        clearTimeout(silenceTimeoutRef.current);
+        silenceTimeoutRef.current = null;
+      }
     };
   }, []);
-  
+
   useEffect(() => {
     // Read the current question whenever it changes
     if (currentQuestion && !isComplete) {
       readQuestion(currentQuestion.text);
     }
   }, [currentQuestionIndex]);
-  
+
   const readQuestion = async (text: string) => {
     try {
+      // Cancel any ongoing speech synthesis
+      window.speechSynthesis.cancel();
+
+      // Stop any ongoing speech recognition before starting text-to-speech
+      if (isListening && recognitionRef.current) {
+        try {
+          recognitionRef.current.stop();
+          setIsListening(false);
+        } catch (e) {
+          console.error('Error stopping speech recognition:', e);
+        }
+      }
+
       setIsReadingQuestion(true);
-      
+
       // Create a simple speech synthesis utterance
       const utterance = new SpeechSynthesisUtterance(text);
       utterance.rate = 1.0;
       utterance.pitch = 1.0;
       utterance.volume = 1.0;
-      
+
       // Use browser's built-in speech synthesis
       window.speechSynthesis.speak(utterance);
-      
+
       utterance.onend = () => {
         setIsReadingQuestion(false);
+
+        // Automatically start listening after the question is read if in auto mode
+        if (autoMode && !isComplete) {
+          // Add a small delay to make the interaction feel more natural
+          setTimeout(() => {
+            // Double-check we're not already listening before starting
+            if (!isListening) {
+              startListening();
+            } else {
+              console.log('Already listening, not starting again');
+            }
+          }, 500);
+        }
       };
-      
+
     } catch (error) {
       console.error('Error reading question:', error);
       setIsReadingQuestion(false);
@@ -130,7 +265,7 @@ const VoiceAgent: React.FC = () => {
       });
     }
   };
-  
+
   const startListening = () => {
     if (!recognitionRef.current) {
       toast({
@@ -139,39 +274,81 @@ const VoiceAgent: React.FC = () => {
       });
       return;
     }
-    
-    setTranscript('');
-    setIsListening(true);
-    recognitionRef.current.start();
-    
-    toast({
-      title: "Listening...",
-      description: "Please speak clearly into your microphone.",
-    });
-  };
-  
-  const stopListening = async () => {
-    if (recognitionRef.current && isListening) {
-      recognitionRef.current.stop();
+
+    // Check if we're already listening - prevent "recognition has already started" error
+    if (isListening) {
+      console.log('Speech recognition is already active, not starting again');
+      return;
     }
-    
-    setIsListening(false);
-    
-    // Use transcript if available or fallback to pre-defined answer
-    const answer = transcript || currentQuestion.answer || '';
-    
+
+    // Reset transcript and silence detection state
+    setTranscript('');
+    lastTranscriptRef.current = '';
+    if (silenceTimeoutRef.current) {
+      clearTimeout(silenceTimeoutRef.current);
+      silenceTimeoutRef.current = null;
+    }
+
+    // Create a new instance of SpeechRecognition each time to avoid state conflicts
+    try {
+      // First, set the state to listening
+      setIsListening(true);
+
+      // Recreate the recognition object to ensure a clean state
+      const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+      recognitionRef.current = new SpeechRecognition();
+      recognitionRef.current.continuous = true;
+      recognitionRef.current.interimResults = true;
+
+      // Set up event handlers
+      setupSpeechRecognitionHandlers();
+
+      // Start recognition
+      recognitionRef.current.start();
+
+      toast({
+        title: "Listening...",
+        description: "Please speak clearly into your microphone.",
+      });
+    } catch (error) {
+      console.error('Error starting speech recognition:', error);
+      setIsListening(false);
+
+      toast({
+        title: "Speech Recognition Error",
+        description: "There was a problem with speech recognition. Please try again.",
+        variant: "destructive",
+      });
+
+      // If in auto mode, try again after a delay
+      if (autoMode && !isComplete) {
+        setTimeout(() => {
+          // Only try again if we're still not listening
+          if (!isListening) {
+            console.log('Retrying speech recognition...');
+            startListening();
+          }
+        }, 1000);
+      }
+    }
+  };
+
+  // Function to process a response and move to the next question
+  const processResponse = async (answer: string) => {
+    if (!answer.trim()) return;
+
     // Store the response locally
     setResponses(prev => ({
       ...prev,
       [currentQuestion.id]: answer
     }));
-    
+
     // Store in our storage util
     storeResponse('voice', {
       question: currentQuestion.text,
       answer
     });
-    
+
     try {
       // Store in Supabase
       await supabase.from('user_responses').insert({
@@ -185,47 +362,157 @@ const VoiceAgent: React.FC = () => {
     } catch (error) {
       console.error('Error storing response in Supabase:', error);
     }
-    
+
     toast({
       title: "Response Recorded",
       description: "We've recorded your answer.",
     });
-    
+
     // Reset transcript
     setTranscript('');
-    
-    // Automatically move to the next question if we have an answer
-    if (answer) {
+
+    // Automatically move to the next question if in auto mode
+    if (autoMode) {
+      // Show a brief "processing" message
+      toast({
+        title: "Processing...",
+        description: "Moving to the next question",
+        duration: 1000,
+      });
+
       setTimeout(() => {
         handleNext();
-      }, 1000);
+      }, 1500);
     }
   };
-  
+
+  const stopListening = async () => {
+    // If we're not listening, don't do anything
+    if (!isListening) return;
+
+    // Set state to not listening first to prevent any race conditions
+    setIsListening(false);
+
+    // Then try to stop the recognition
+    if (recognitionRef.current) {
+      try {
+        recognitionRef.current.stop();
+      } catch (error) {
+        console.error('Error stopping speech recognition:', error);
+        // Even if there's an error, we'll continue processing the transcript
+      }
+    }
+
+    // Clear any pending silence detection
+    if (silenceTimeoutRef.current) {
+      clearTimeout(silenceTimeoutRef.current);
+      silenceTimeoutRef.current = null;
+    }
+
+    // Use transcript if available or fallback to pre-defined answer
+    const answer = transcript || currentQuestion.answer || '';
+
+    // Only proceed if we have an actual answer
+    if (answer.trim()) {
+      // Process the response
+      await processResponse(answer);
+    } else {
+      // If no answer was provided, restart listening
+      if (autoMode && !isComplete) {
+        toast({
+          title: "No response detected",
+          description: "Please try speaking again.",
+        });
+
+        // Make sure we're not already listening before trying to start again
+        setTimeout(() => {
+          if (!isListening) {
+            startListening();
+          }
+        }, 1000);
+      }
+    }
+  };
+
   const handleNext = () => {
+    // Stop any ongoing speech synthesis
+    window.speechSynthesis.cancel();
+
+    // Stop any ongoing listening
+    if (isListening) {
+      if (recognitionRef.current) {
+        recognitionRef.current.stop();
+      }
+      setIsListening(false);
+    }
+
+    // Clear any pending silence detection
+    if (silenceTimeoutRef.current) {
+      clearTimeout(silenceTimeoutRef.current);
+      silenceTimeoutRef.current = null;
+    }
+
     if (currentQuestionIndex < accidentQuestions.length - 1) {
       const nextIndex = currentQuestionIndex + 1;
       setCurrentQuestionIndex(nextIndex);
       setActiveCategory(accidentQuestions[nextIndex].category);
+
+      // The useEffect will trigger the reading of the next question
     } else {
       setIsComplete(true);
-      
+
       toast({
         title: "Report Complete",
         description: "Thank you for providing all the details about your accident.",
       });
     }
   };
-  
+
   const handlePrevious = () => {
+    // Stop any ongoing speech synthesis
+    window.speechSynthesis.cancel();
+
+    // Stop any ongoing listening
+    if (isListening) {
+      if (recognitionRef.current) {
+        recognitionRef.current.stop();
+      }
+      setIsListening(false);
+    }
+
+    // Clear any pending silence detection
+    if (silenceTimeoutRef.current) {
+      clearTimeout(silenceTimeoutRef.current);
+      silenceTimeoutRef.current = null;
+    }
+
     if (currentQuestionIndex > 0) {
       const prevIndex = currentQuestionIndex - 1;
       setCurrentQuestionIndex(prevIndex);
       setActiveCategory(accidentQuestions[prevIndex].category);
+
+      // The useEffect will trigger the reading of the previous question
     }
   };
-  
+
   const resetForm = () => {
+    // Stop any ongoing speech synthesis
+    window.speechSynthesis.cancel();
+
+    // Stop any ongoing listening
+    if (isListening) {
+      if (recognitionRef.current) {
+        recognitionRef.current.stop();
+      }
+      setIsListening(false);
+    }
+
+    // Clear any pending silence detection
+    if (silenceTimeoutRef.current) {
+      clearTimeout(silenceTimeoutRef.current);
+      silenceTimeoutRef.current = null;
+    }
+
     setCurrentQuestionIndex(0);
     setResponses({});
     setIsComplete(false);
@@ -233,41 +520,86 @@ const VoiceAgent: React.FC = () => {
     if (accidentQuestions.length > 0) {
       setActiveCategory(accidentQuestions[0].category);
     }
+
+    // The useEffect will trigger the reading of the first question
   };
-  
+
+  // Handle file upload completion
+  const handleFileUploadComplete = (fileUrl: string, fileName: string, fileType: string) => {
+    // Add the file to the uploaded files list
+    setUploadedFiles(prev => [
+      ...prev,
+      {
+        url: fileUrl,
+        fileName,
+        fileType,
+        questionId: currentQuestion?.id
+      }
+    ]);
+
+    // Add a reference to the file in the response
+    const fileResponse = `[File uploaded: ${fileName}]`;
+    setResponses(prev => ({
+      ...prev,
+      [currentQuestion.id]: prev[currentQuestion.id]
+        ? `${prev[currentQuestion.id]}\n${fileResponse}`
+        : fileResponse
+    }));
+
+    // Hide the file upload UI after successful upload
+    setShowFileUpload(false);
+
+    // If in auto mode, move to the next question after a delay
+    if (autoMode) {
+      setTimeout(() => {
+        handleNext();
+      }, 1500);
+    }
+  };
+
+  // Toggle file upload UI
+  const toggleFileUpload = () => {
+    setShowFileUpload(prev => !prev);
+  };
+
   const hasCurrentResponse = responses[currentQuestion?.id];
-  
+
   // Get unique categories
   const categories = Array.from(new Set(accidentQuestions.map(q => q.category)));
-  
+
   // Get current category progress
   const getCurrentCategoryProgress = () => {
     if (!activeCategory) return { current: 0, total: 0 };
-    
+
     const categoryQuestions = accidentQuestions.filter(q => q.category === activeCategory);
     const currentCatIndex = categoryQuestions.findIndex(q => q.id === currentQuestion.id);
-    
+
     return {
       current: currentCatIndex + 1,
       total: categoryQuestions.length
     };
   };
-  
+
+  // Get files for current question
+  const getCurrentQuestionFiles = () => {
+    return uploadedFiles.filter(file => file.questionId === currentQuestion?.id);
+  };
+
   const progress = getCurrentCategoryProgress();
 
   return (
     <div className="min-h-screen flex flex-col">
       <Navbar />
-      
+
       <main className="flex-1">
         <div className="container mx-auto px-4 py-12">
           <div className="max-w-3xl mx-auto">
             <h1 className="text-3xl font-bold mb-8 text-center text-gray-900">Voice Accident Assistant</h1>
-            
+
             <div className="mb-6">
               <div className="flex flex-wrap gap-2 justify-center">
                 {categories.map((category, index) => (
-                  <div 
+                  <div
                     key={index}
                     className={`px-3 py-1.5 rounded-full text-sm font-medium cursor-pointer transition-colors
                       ${activeCategory === category ? 'bg-brand-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}
@@ -277,20 +609,62 @@ const VoiceAgent: React.FC = () => {
                 ))}
               </div>
             </div>
-            
+
             <Card className="shadow-md border-gray-200">
               <CardHeader>
-                <CardTitle>Accident Details Collection</CardTitle>
-                <CardDescription>
-                  Please answer the following questions about your accident using your voice.
-                </CardDescription>
-                {activeCategory && (
-                  <div className="mt-2 text-sm text-gray-600">
-                    {activeCategory} - Question {progress.current} of {progress.total}
+                <div className="flex justify-between items-start">
+                  <div>
+                    <CardTitle>Accident Details Collection</CardTitle>
+                    <CardDescription>
+                      Please answer the following questions about your accident using your voice.
+                    </CardDescription>
+                    {activeCategory && (
+                      <div className="mt-2 text-sm text-gray-600">
+                        {activeCategory} - Question {progress.current} of {progress.total}
+                      </div>
+                    )}
                   </div>
-                )}
+                  <div className="flex items-center space-x-2">
+                    <TooltipProvider>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <div className="flex items-center space-x-2">
+                            <Switch
+                              id="auto-mode"
+                              checked={autoMode}
+                              onCheckedChange={setAutoMode}
+                            />
+                            <label
+                              htmlFor="auto-mode"
+                              className="text-sm font-medium flex items-center cursor-pointer"
+                            >
+                              {autoMode ? (
+                                <>
+                                  <Zap className="h-4 w-4 text-brand-600 mr-1" />
+                                  <span>Auto Mode (Hands-free)</span>
+                                </>
+                              ) : (
+                                <>
+                                  <ZapOff className="h-4 w-4 text-gray-500 mr-1" />
+                                  <span className="text-gray-500">Manual Mode</span>
+                                </>
+                              )}
+                            </label>
+                          </div>
+                        </TooltipTrigger>
+                        <TooltipContent>
+                          <p>
+                            {autoMode
+                              ? "Fully automated: questions will be read aloud and the system will automatically progress after you speak"
+                              : "Manual control: you'll need to click buttons to progress through questions"}
+                          </p>
+                        </TooltipContent>
+                      </Tooltip>
+                    </TooltipProvider>
+                  </div>
+                </div>
               </CardHeader>
-              
+
               <CardContent>
                 {!isComplete ? (
                   <>
@@ -314,39 +688,97 @@ const VoiceAgent: React.FC = () => {
                         </div>
                       </div>
                     </div>
-                    
+
                     <div className="flex flex-col gap-4">
-                      <div className="flex justify-center">
-                        <Button 
-                          size="lg"
-                          onClick={isListening ? stopListening : startListening} 
-                          className={`rounded-full h-16 w-16 ${isListening ? 'bg-red-500 hover:bg-red-600' : 'bg-brand-600 hover:bg-brand-700'}`}
-                          disabled={!('SpeechRecognition' in window || 'webkitSpeechRecognition' in window) || isReadingQuestion}
-                        >
-                          {isListening ? (
-                            <MicOff className="h-6 w-6" />
-                          ) : (
-                            <Mic className="h-6 w-6" />
-                          )}
-                        </Button>
-                      </div>
-                      
+                      {/* Current question files */}
+                      {getCurrentQuestionFiles().length > 0 && (
+                        <div className="mb-4 space-y-2">
+                          <p className="text-sm font-medium text-gray-700">Uploaded files:</p>
+                          {getCurrentQuestionFiles().map((file, index) => (
+                            <FileDisplay
+                              key={index}
+                              fileUrl={file.url}
+                              fileName={file.fileName}
+                              fileType={file.fileType}
+                            />
+                          ))}
+                        </div>
+                      )}
+
+                      {/* File upload UI */}
+                      {showFileUpload ? (
+                        <div className="mb-4">
+                          <FileUpload
+                            sessionId={sessionId}
+                            onUploadComplete={handleFileUploadComplete}
+                            questionId={currentQuestion?.id}
+                          />
+                          <div className="mt-2 flex justify-end">
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={toggleFileUpload}
+                            >
+                              Cancel
+                            </Button>
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="flex justify-center gap-4">
+                          <Button
+                            size="lg"
+                            onClick={isListening ? stopListening : startListening}
+                            className={`rounded-full h-16 w-16 ${isListening ? 'bg-red-500 hover:bg-red-600' : 'bg-brand-600 hover:bg-brand-700'}`}
+                            disabled={!('SpeechRecognition' in window || 'webkitSpeechRecognition' in window) || isReadingQuestion}
+                          >
+                            {isListening ? (
+                              <MicOff className="h-6 w-6" />
+                            ) : (
+                              <Mic className="h-6 w-6" />
+                            )}
+                          </Button>
+
+                          <Button
+                            size="icon"
+                            variant="outline"
+                            onClick={toggleFileUpload}
+                            className="rounded-full h-12 w-12"
+                            title="Upload a file"
+                          >
+                            <Upload className="h-5 w-5" />
+                          </Button>
+                        </div>
+                      )}
+
                       <div className="text-center text-sm text-gray-500">
-                        {isListening ? 'Click to stop recording' : 'Click to start recording your answer'}
+                        {isListening
+                          ? (autoMode ? 'Recording... (will stop automatically)' : 'Click to stop recording')
+                          : (autoMode ? 'Recording will start automatically' : 'Click to start recording your answer or upload a file')
+                        }
                       </div>
-                      
-                      <div className="flex justify-between mt-4">
-                        <Button variant="outline" onClick={handlePrevious} disabled={currentQuestionIndex === 0}>
-                          <ChevronLeft className="mr-1 h-4 w-4" />
-                          Previous
-                        </Button>
-                        <Button onClick={handleNext} disabled={!hasCurrentResponse && !transcript}>
-                          {currentQuestionIndex === accidentQuestions.length - 1 ? 'Complete' : 'Next'}
-                          {currentQuestionIndex !== accidentQuestions.length - 1 && (
-                            <ChevronRight className="ml-1 h-4 w-4" />
-                          )}
-                        </Button>
-                      </div>
+
+                      {/* Only show navigation buttons in manual mode */}
+                      {!autoMode && (
+                        <div className="flex justify-between mt-4">
+                          <Button variant="outline" onClick={handlePrevious} disabled={currentQuestionIndex === 0}>
+                            <ChevronLeft className="mr-1 h-4 w-4" />
+                            Previous
+                          </Button>
+                          <Button onClick={handleNext} disabled={!hasCurrentResponse && !transcript && getCurrentQuestionFiles().length === 0}>
+                            {currentQuestionIndex === accidentQuestions.length - 1 ? 'Complete' : 'Next'}
+                            {currentQuestionIndex !== accidentQuestions.length - 1 && (
+                              <ChevronRight className="ml-1 h-4 w-4" />
+                            )}
+                          </Button>
+                        </div>
+                      )}
+
+                      {/* Show auto-progress indicator in auto mode */}
+                      {autoMode && hasCurrentResponse && (
+                        <div className="text-center mt-4 text-sm text-gray-600">
+                          <p>Automatically proceeding to next question...</p>
+                        </div>
+                      )}
                     </div>
                   </>
                 ) : (
@@ -378,7 +810,7 @@ const VoiceAgent: React.FC = () => {
           </div>
         </div>
       </main>
-      
+
       <Footer />
     </div>
   );

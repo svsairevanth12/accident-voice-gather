@@ -4,7 +4,6 @@ import Navbar from '@/components/Navbar';
 import HeroSection from '@/components/HeroSection';
 import FeatureSection from '@/components/FeatureSection';
 import Footer from '@/components/Footer';
-import ChatWidget from '@/components/ChatWidget';
 
 const Index = () => {
   return (
@@ -15,7 +14,6 @@ const Index = () => {
         <FeatureSection />
       </main>
       <Footer />
-      <ChatWidget />
     </div>
   );
 };
